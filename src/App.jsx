@@ -110,23 +110,56 @@ export default function App() {
   const STATIC  = market === "US" ? US_STATIC  : TW_STATIC;
   const UNIT    = market === "US" ? "$" : "NT$";
 
+  const YAHOO_PROXY = "https://corsproxy.io/?";
+
+  // Yahoo Finance: 台股報價
+  const fetchYahooQuote = async (symbol) => {
+    const url = `https://query1.finance.yahoo.com/v8/finance/chart/${symbol}?interval=1d&range=1d`;
+    const res = await fetch(YAHOO_PROXY + encodeURIComponent(url));
+    if (!res.ok) throw new Error(res.status);
+    const d = await res.json();
+    const meta = d.chart?.result?.[0]?.meta;
+    if (!meta?.regularMarketPrice) throw new Error("no data");
+    const price = meta.regularMarketPrice;
+    const prev  = meta.chartPreviousClose || meta.previousClose || price;
+    const change = price - prev;
+    const changePct = prev ? (change / prev) * 100 : 0;
+    return { price, change, changePct };
+  };
+
+  // Yahoo Finance: 台股歷史（週線，3個月）
+  const fetchYahooHistory = async (symbol) => {
+    const url = `https://query1.finance.yahoo.com/v8/finance/chart/${symbol}?interval=1wk&range=3mo`;
+    const res = await fetch(YAHOO_PROXY + encodeURIComponent(url));
+    if (!res.ok) throw new Error(res.status);
+    const d = await res.json();
+    const closes = d.chart?.result?.[0]?.indicators?.quote?.[0]?.close;
+    return closes?.filter(Boolean) || [];
+  };
+
   const fetchQuotes = useCallback(async (tickers) => {
     setLoading(true);
     const newQuotes = {};
     const newStatus = {};
+    const isTW = tickers[0]?.endsWith(".TW");
+
     await Promise.all(tickers.map(async (t) => {
       try {
-        const res = await fetch(`https://finnhub.io/api/v1/quote?symbol=${t}&token=${FINNHUB_KEY}`);
-        if (!res.ok) throw new Error(res.status);
-        const d = await res.json();
-        if (d.c && d.c > 0) {
-          newQuotes[t] = { price: d.c, change: d.d, changePct: d.dp };
-          newStatus[t] = "ok";
+        let data;
+        if (isTW) {
+          data = await fetchYahooQuote(t);
         } else {
-          newStatus[t] = "nodata";
+          const res = await fetch(`https://finnhub.io/api/v1/quote?symbol=${t}&token=${FINNHUB_KEY}`);
+          if (!res.ok) throw new Error(res.status);
+          const d = await res.json();
+          if (!d.c || d.c <= 0) throw new Error("no data");
+          data = { price: d.c, change: d.d, changePct: d.dp };
         }
+        newQuotes[t] = data;
+        newStatus[t] = "ok";
       } catch(e) { newStatus[t] = "err"; }
     }));
+
     setQuotes(q => ({ ...q, ...newQuotes }));
     setLoadStatus(s => ({ ...s, ...newStatus }));
     setLastRefresh(new Date());
@@ -137,11 +170,19 @@ export default function App() {
     const now  = Math.floor(Date.now() / 1000);
     const from = now - 90 * 86400;
     const newHist = {};
+    const isTW = tickers[0]?.endsWith(".TW");
+
     await Promise.all(tickers.map(async (t) => {
       try {
-        const res = await fetch(`https://finnhub.io/api/v1/stock/candle?symbol=${t}&resolution=W&from=${from}&to=${now}&token=${FINNHUB_KEY}`);
-        const d = await res.json();
-        if (d.s === "ok" && d.c?.length > 1) newHist[t] = d.c;
+        let closes;
+        if (isTW) {
+          closes = await fetchYahooHistory(t);
+        } else {
+          const res = await fetch(`https://finnhub.io/api/v1/stock/candle?symbol=${t}&resolution=W&from=${from}&to=${now}&token=${FINNHUB_KEY}`);
+          const d = await res.json();
+          closes = (d.s === "ok" && d.c?.length > 1) ? d.c : null;
+        }
+        if (closes?.length > 1) newHist[t] = closes;
       } catch(e) {}
     }));
     setHistory(h => ({ ...h, ...newHist }));
